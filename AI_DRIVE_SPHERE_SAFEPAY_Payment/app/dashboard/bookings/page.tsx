@@ -1,23 +1,18 @@
 import { createClient } from "@/lib/supabase/server"
 import { Card, CardContent } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { CalendarDays, CheckCircle2, FileText } from "lucide-react"
+import { CalendarDays, CheckCircle2, FileText, CreditCard } from "lucide-react"
 import Link from "next/link"
 import { CancelBookingButton } from "@/components/dashboard/cancel-booking-button"
 import { PayBookingButton } from "@/components/dashboard/pay-booking-button"
 
 const statusColors: Record<string, "default" | "secondary" | "destructive" | "outline"> = {
-  pending: "outline",
-  confirmed: "secondary",
-  active: "default",
-  completed: "secondary",
-  cancelled: "destructive",
+  pending: "outline", confirmed: "secondary", active: "default",
+  completed: "secondary", cancelled: "destructive",
 }
 
 const paymentColors: Record<string, string> = {
-  unpaid: "text-amber-500",
-  paid: "text-green-400",
-  refunded: "text-blue-400",
+  unpaid: "text-amber-500", paid: "text-green-400", refunded: "text-blue-400",
 }
 
 export default async function BookingsPage() {
@@ -30,11 +25,20 @@ export default async function BookingsPage() {
     .eq("user_id", user!.id)
     .order("created_at", { ascending: false })
 
-  // Fetch all agreements for this user so we can check per booking
   const { data: agreements } = await supabase
     .from("agreements")
     .select("id, booking_id, status")
     .eq("user_id", user!.id)
+
+  // Check CNIC verification status
+  const { data: cnicDoc } = await supabase
+    .from("cnic_documents")
+    .select("status, front_url, back_url")
+    .eq("user_id", user!.id)
+    .single()
+
+  const cnicVerified = cnicDoc?.status === "verified"
+  const cnicUploaded = !!cnicDoc?.front_url && !!cnicDoc?.back_url
 
   return (
     <div className="flex flex-col gap-8">
@@ -50,6 +54,24 @@ export default async function BookingsPage() {
           New Booking
         </Link>
       </div>
+
+      {/* CNIC warning banner */}
+      {!cnicVerified && (
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 flex items-start gap-3">
+          <CreditCard className="h-5 w-5 text-amber-500 flex-shrink-0 mt-0.5" />
+          <div>
+            <p className="text-sm font-medium text-amber-500">CNIC Verification Required</p>
+            <p className="text-xs text-amber-500/80 mt-0.5">
+              {!cnicUploaded
+                ? "Upload your CNIC to unlock payments. "
+                : "Your CNIC is pending admin verification. "}
+              <Link href="/dashboard/agreements" className="underline">
+                Go to Agreements →
+              </Link>
+            </p>
+          </div>
+        </div>
+      )}
 
       {!bookings || bookings.length === 0 ? (
         <Card>
@@ -67,19 +89,39 @@ export default async function BookingsPage() {
       ) : (
         <div className="flex flex-col gap-4">
           {bookings.map((booking: any) => {
-            const needsPayment = booking.status === "pending" && booking.payment_status === "unpaid"
+            const needsPayment =
+              booking.status === "pending" && booking.payment_status === "unpaid"
             const isPaid = booking.payment_status === "paid"
 
-            // Check agreement status for this booking
             const agreement = agreements?.find((a: any) => a.booking_id === booking.id)
             const agreementExists = !!agreement
             const agreementSigned = agreement?.status === "signed"
 
+            // Both CNIC verified AND agreement signed required
+            const canPay = needsPayment && cnicVerified && agreementSigned
+
             const start = new Date(booking.start_date)
             const end = new Date(booking.end_date)
             const days = Math.round((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24))
-            const startFormatted = start.toLocaleDateString("en-PK", { weekday: "short", year: "numeric", month: "short", day: "numeric" })
-            const endFormatted = end.toLocaleDateString("en-PK", { weekday: "short", year: "numeric", month: "short", day: "numeric" })
+            const startFormatted = start.toLocaleDateString("en-PK", {
+              weekday: "short", year: "numeric", month: "short", day: "numeric"
+            })
+            const endFormatted = end.toLocaleDateString("en-PK", {
+              weekday: "short", year: "numeric", month: "short", day: "numeric"
+            })
+
+            // Determine what's blocking payment
+            const blockReason = needsPayment
+              ? !cnicUploaded
+                ? "Upload your CNIC first"
+                : !cnicVerified
+                ? "Waiting for CNIC verification"
+                : !agreementExists
+                ? "Waiting for admin to generate agreement"
+                : !agreementSigned
+                ? "Sign your rental agreement first"
+                : null
+              : null
 
             return (
               <Card key={booking.id} className={needsPayment ? "border-amber-500/30" : ""}>
@@ -89,7 +131,9 @@ export default async function BookingsPage() {
                       <h3 className="font-serif text-lg font-bold text-card-foreground">
                         {booking.vehicles?.name || "Vehicle"}
                       </h3>
-                      <Badge variant={statusColors[booking.status] || "outline"}>{booking.status}</Badge>
+                      <Badge variant={statusColors[booking.status] || "outline"}>
+                        {booking.status}
+                      </Badge>
                       {isPaid && (
                         <span className="flex items-center gap-1 text-xs text-green-400 font-medium">
                           <CheckCircle2 className="h-3.5 w-3.5" /> Paid
@@ -111,25 +155,30 @@ export default async function BookingsPage() {
                       <p className="mt-1 text-xs text-muted-foreground italic">{booking.notes}</p>
                     )}
 
-                    {/* Agreement status indicator */}
-                    {needsPayment && !agreementExists && (
-                      <p className="mt-1 text-xs text-amber-500 flex items-center gap-1">
-                        ⏳ Waiting for admin to generate your rental agreement
-                      </p>
-                    )}
-                    {needsPayment && agreementExists && !agreementSigned && (
-                      <Link
-                        href="/dashboard/agreements"
-                        className="mt-1 text-xs text-blue-400 underline flex items-center gap-1 hover:text-blue-300"
-                      >
-                        <FileText className="h-3 w-3" />
-                        Sign rental agreement to unlock payment →
-                      </Link>
-                    )}
-                    {needsPayment && agreementSigned && (
-                      <p className="mt-1 text-xs text-green-400 flex items-center gap-1">
-                        <CheckCircle2 className="h-3 w-3" /> Agreement signed — you can now pay
-                      </p>
+                    {/* Step-by-step status indicators */}
+                    {needsPayment && (
+                      <div className="mt-2 flex flex-col gap-1">
+                        <StepIndicator
+                          done={cnicVerified}
+                          pending={cnicUploaded && !cnicVerified}
+                          label={
+                            cnicVerified ? "CNIC verified ✓" :
+                            cnicUploaded ? "CNIC pending admin approval" :
+                            "Upload CNIC"
+                          }
+                          href="/dashboard/agreements"
+                        />
+                        <StepIndicator
+                          done={agreementSigned}
+                          pending={agreementExists && !agreementSigned}
+                          label={
+                            agreementSigned ? "Agreement signed ✓" :
+                            agreementExists ? "Sign your rental agreement" :
+                            "Waiting for admin to generate agreement"
+                          }
+                          href={agreementExists ? "/dashboard/agreements" : undefined}
+                        />
+                      </div>
                     )}
                   </div>
 
@@ -144,8 +193,7 @@ export default async function BookingsPage() {
                     </div>
 
                     <div className="flex gap-2">
-                      {/* Pay only if agreement is signed */}
-                      {needsPayment && agreementSigned && (
+                      {canPay ? (
                         <PayBookingButton
                           bookingId={booking.id}
                           vehicleName={booking.vehicles?.name || "Vehicle"}
@@ -154,17 +202,16 @@ export default async function BookingsPage() {
                           endDate={endFormatted}
                           days={days}
                         />
-                      )}
-                      {/* If no agreement yet, show disabled state */}
-                      {needsPayment && !agreementSigned && (
+                      ) : needsPayment ? (
                         <button
                           disabled
-                          className="flex items-center gap-2 rounded-md bg-gray-200 px-3 py-2 text-xs font-medium text-gray-400 cursor-not-allowed"
-                          title={!agreementExists ? "Waiting for agreement" : "Sign agreement first"}
+                          title={blockReason || "Requirements not met"}
+                          className="flex items-center gap-2 rounded-md bg-gray-100 dark:bg-gray-800 px-3 py-2 text-xs font-medium text-gray-400 cursor-not-allowed"
                         >
                           🔒 Pay PKR {Number(booking.total_price).toLocaleString()}
                         </button>
-                      )}
+                      ) : null}
+
                       {(booking.status === "pending" || booking.status === "confirmed") && (
                         <CancelBookingButton bookingId={booking.id} />
                       )}
@@ -179,3 +226,33 @@ export default async function BookingsPage() {
     </div>
   )
 }
+
+function StepIndicator({
+  done, pending, label, href
+}: {
+  done: boolean
+  pending: boolean
+  label: string
+  href?: string
+}) {
+  const content = (
+    <span className={`text-xs flex items-center gap-1 ${
+      done ? "text-green-400" :
+      pending ? "text-amber-500" :
+      "text-muted-foreground"
+    }`}>
+      {done ? "✅" : pending ? "⏳" : "⬜"} {label}
+    </span>
+  )
+
+  if (href && !done) {
+    return (
+      <Link href={href} className="hover:opacity-80 underline underline-offset-2">
+        {content}
+      </Link>
+    )
+  }
+
+  return content
+}
+EOF
